@@ -50,22 +50,57 @@ using namespace std;
 
 typedef pcl::PointXYZI  PointType;
 
-extern const string pointCloudTopic = "/velodyne_points";
+//------------------------------------------RoboM1_Lidar----------------------------------------------------
+extern const float azimuth_thres = 60.0;
+extern const float elevation_thres = 12.5;
+
+
+extern const string pointCloudTopic = "/rslidar_points"; 
+extern const bool useCloudRing = false; // if true, ang_res_y and ang_bottom are not used
+
+extern const float ang_res_x = 0.2;
+extern const float ang_res_y = 0.2;
+extern const int N_SCAN = 2 * round(elevation_thres/ang_res_y) + 1;
+extern const int Horizon_SCAN = 2 * round(azimuth_thres/ang_res_x) + 1;
+extern const int groundScanInd = int(N_SCAN/3); // 4
+
+struct RsPointXYZIRT
+{
+  PCL_ADD_POINT4D;
+  uint8_t intensity;
+  uint16_t ring = 0;
+  double timestamp = 0;
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+} EIGEN_ALIGN16;
+POINT_CLOUD_REGISTER_POINT_STRUCT(RsPointXYZIRT, 
+                                (float, x, x)
+                                (float, y, y)
+                                (float, z, z)
+                                (uint8_t, intensity, intensity)
+                                (uint16_t, ring, ring)
+                                (double, timestamp, timestamp))
+
+
+//----------------------------------------------------------------------------------------------
+
+
+// extern const string pointCloudTopic = "/velodyne_points";
 extern const string imuTopic = "/imu/data";
 
 // Save pcd
 extern const string fileDirectory = "/tmp/";
 
 // Using velodyne cloud "ring" channel for image projection (other lidar may have different name for this channel, change "PointXYZIR" below)
-extern const bool useCloudRing = true; // if true, ang_res_y and ang_bottom are not used
+// extern const bool useCloudRing = true; // if true, ang_res_y and ang_bottom are not used
+
 
 // VLP-16
-extern const int N_SCAN = 16;
-extern const int Horizon_SCAN = 1800;
-extern const float ang_res_x = 0.2;
-extern const float ang_res_y = 2.0;
-extern const float ang_bottom = 15.0+0.1;
-extern const int groundScanInd = 7;
+// extern const int N_SCAN = 16;
+// extern const int Horizon_SCAN = 1800;
+// extern const float ang_res_x = 0.2;
+// extern const float ang_res_y = 2.0;
+// extern const float ang_bottom = 15.0+0.1;
+// extern const int groundScanInd = 7;
 
 // HDL-32E
 // extern const int N_SCAN = 32;
@@ -101,7 +136,9 @@ extern const int groundScanInd = 7;
 // extern const float ang_bottom = 16.6+0.1;
 // extern const int groundScanInd = 15;
 
-extern const bool loopClosureEnableFlag = false;
+
+
+extern const bool loopClosureEnableFlag = true;
 extern const double mappingProcessInterval = 0.3;
 
 extern const float scanPeriod = 0.1;
@@ -120,8 +157,8 @@ extern const float segmentAlphaY = ang_res_y / 180.0 * M_PI;
 extern const int edgeFeatureNum = 2;
 extern const int surfFeatureNum = 4;
 extern const int sectionsTotal = 6;
-extern const float edgeThreshold = 0.1;
-extern const float surfThreshold = 0.1;
+extern const float edgeThreshold = 0.4;
+extern const float surfThreshold = 0.2;
 extern const float nearestFeatureSearchSqDist = 25;
 
 

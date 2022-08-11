@@ -56,6 +56,7 @@ private:
     pcl::PointCloud<RsPointXYZIRT>::Ptr DAE_Cloud; // "Depth Azimuth Elevation" instead of "x y z"
     pcl::PointCloud<RsPointXYZIRT>::Ptr downsampled_DAE_Cloud;
     pcl::PointCloud<RsPointXYZIRT>::Ptr downsampled_DAE_Cloud2; // for debug
+    pcl::PointCloud<RsPointXYZIRT>::Ptr filteredCloud; // for debug
     pcl::PointCloud<RsPointXYZIRT>::Ptr fullCloud;    
     pcl::PointCloud<RsPointXYZIRT>::Ptr fullInfoCloud; 
     pcl::PointCloud<RsPointXYZIRT>::Ptr groundCloud;
@@ -83,6 +84,11 @@ private:
 
     uint16_t *queueIndX; // array for breadth-first search process of segmentation, for speed
     uint16_t *queueIndY;
+
+    std::vector<int> point_idx;
+    std::vector<int> point_row;
+    std::vector<int> point_col;
+    bool point_filtered = false;
 
 public:
     ImageProjection():
@@ -117,6 +123,7 @@ public:
         DAE_Cloud.reset(new pcl::PointCloud<RsPointXYZIRT>());
         downsampled_DAE_Cloud.reset(new pcl::PointCloud<RsPointXYZIRT>());
         downsampled_DAE_Cloud2.reset(new pcl::PointCloud<RsPointXYZIRT>());
+        filteredCloud.reset(new pcl::PointCloud<RsPointXYZIRT>());
         fullCloud.reset(new pcl::PointCloud<RsPointXYZIRT>());
         fullInfoCloud.reset(new pcl::PointCloud<RsPointXYZIRT>());
 
@@ -331,16 +338,19 @@ public:
     }
     
     // fill map_ele_azi_idx
-    bool construct_point_mat(float ele_val, float azi_val, int point_index, std::map<float,std::map<float, int> >& map_ele_azi_idx)
+    void construct_point_mat(float ele_val, float azi_val, int point_index, std::map<float,std::map<float, int> >& map_ele_azi_idx)
     {
         int ele_index = round(ele_val/ang_res_y); // bottom to top, [-90, 90]/ang_res_y
         int azi_index = round(azi_val/ang_res_x); // right to left, [-90, 90]/ang_res_y
         float new_dist = pow(DAE_Cloud->points[point_index].y - azi_index*ang_res_x, 2) + 
                                 pow(DAE_Cloud->points[point_index].z - ele_index*ang_res_y, 2);
         
-        if (sqrt(new_dist) > min(ang_res_x, ang_res_y))
-            return false;
-
+        if (sqrt(new_dist) > min(ang_res_x, ang_res_y)/2)
+        {
+            cout<<"pass."<<endl;
+            return;
+        }
+            
         auto ele_found1 = map_ele_azi_idx.find(ele_index);
         if (ele_found1 == map_ele_azi_idx.end()) // not found
         {
@@ -356,16 +366,33 @@ public:
             else
             {                
                 int curr_index = map_ele_azi_idx.at(ele_index).at(azi_index);
+
+                // // by intensity
+                // float curr_intensity = DAE_Cloud->points[curr_index].intensity;
+                // if (DAE_Cloud->points[point_index].intensity > curr_intensity)
+                //     map_ele_azi_idx.at(ele_index).at(azi_index) = point_index;
+
+                // by dist 
                 float curr_dist = pow(DAE_Cloud->points[curr_index].y - azi_index*ang_res_x, 2) + 
-                                    pow(DAE_Cloud->points[curr_index].z - ele_index*ang_res_y, 2);                
+                                pow(DAE_Cloud->points[curr_index].z - ele_index*ang_res_y, 2);                
                 if (new_dist < curr_dist)
                     map_ele_azi_idx.at(ele_index).at(azi_index) = point_index;
+
             }
         }
-        return true;
+    }
+
+    // debug
+    void get_filteredCloud()
+    {
+        filteredCloud->points.resize(point_idx.size());
+        for (int i=0; i<point_idx.size(); i++)
+        {
+            filteredCloud->points[i] = laserCloudIn->points[point_idx[i]];
+        }
     }
     
-    // for debug
+    // debug
     void fill_downsampled_DAE_Cloud(std::map<float,std::map<float, int> >& map_ele_azi_idx)
     {
         // generate downsampled_point_num for debug
@@ -408,62 +435,39 @@ public:
         cout<<"row: ["<<minrow<<", "<<maxrow<<"]; col: ["<<mincol<<", "<<maxcol<<"]"<<endl;
     }
 
-    void projectPointCloud(std::map<float,std::map<float, int> >& map_ele_azi_idx)
+    void projectPointCloud()
     {
         // range image projection
         // construct rangeMat to save range value for every point.
         // construct fullCloud to save XYZ(I1)RT for points. I1 stands for a float value, which means ROW.COL .
         // construct fullInfoCloud to save XYZ(I2)RT for points. I2 stands for the point's range value.
 
-        int downsampled_point_num = 0;
-        for (const auto& ele_azi_idx : map_ele_azi_idx)
-           downsampled_point_num += ele_azi_idx.second.size();
 
-        uint rowIdn, columnIdn, index, cloudSize = downsampled_point_num;
+
+        uint rowIdn, columnIdn, index;
 
         RsPointXYZIRT thisPoint;
-        // int mean_num_by_row = 0;
-        // int row_num = 0;
-        for (const auto& ele_azi_idx : map_ele_azi_idx)
+        for (int i=0; i<point_idx.size(); i++)
         {
-            // int pt_num_by_row = 0;
-            for (const auto& azi_idx : ele_azi_idx.second)
-            {
-                thisPoint.x = laserCloudIn->points[azi_idx.second].x;
-                thisPoint.y = laserCloudIn->points[azi_idx.second].y;
-                thisPoint.z = laserCloudIn->points[azi_idx.second].z;
-                thisPoint.ring = laserCloudIn->points[azi_idx.second].ring;
-                thisPoint.timestamp = laserCloudIn->points[azi_idx.second].timestamp;
-  
-                float range = sqrt(thisPoint.x * thisPoint.x + thisPoint.y * thisPoint.y + thisPoint.z * thisPoint.z);
-                if (range < sensorMinimumRange)
-                    continue;
+            thisPoint.x = laserCloudIn->points[point_idx[i]].x;
+            thisPoint.y = laserCloudIn->points[point_idx[i]].y;
+            thisPoint.z = laserCloudIn->points[point_idx[i]].z;
+            thisPoint.ring = laserCloudIn->points[point_idx[i]].ring;
+            thisPoint.timestamp = laserCloudIn->points[point_idx[i]].timestamp;
 
-                rowIdn = ele_azi_idx.first + round(elevation_thres/ang_res_y); // e.g. [-6, 6] --> [0, 12]
-                // if ((rowIdn < float(N_SCAN)*0.1)||(rowIdn > float(N_SCAN)*0.9))
-                //     continue;
+            float range = sqrt(thisPoint.x * thisPoint.x + thisPoint.y * thisPoint.y + thisPoint.z * thisPoint.z);
+            if (range < sensorMinimumRange)
+                continue;
 
-                columnIdn = azi_idx.first + round(azimuth_thres/ang_res_x); // e.g. [-300, 300] --> [0, 600]
-                // if ((columnIdn < float(Horizon_SCAN)*0.2)|| (columnIdn > float(Horizon_SCAN)*0.8))
-                //     continue;
+            thisPoint.intensity = (float)point_row[i] + (float)point_col[i] / 10000.0; //row.col
 
-                thisPoint.intensity = (float)rowIdn + (float)columnIdn / 10000.0; //row.col
+            index = point_col[i]  + point_row[i] * Horizon_SCAN;
+            fullCloud->points[index] = thisPoint;
+            fullInfoCloud->points[index] = thisPoint;
+            fullInfoCloud->points[index].intensity = range; // the corresponding range of a point is saved as "intensity"
 
-                index = columnIdn  + rowIdn * Horizon_SCAN;
-                fullCloud->points[index] = thisPoint;
-                fullInfoCloud->points[index] = thisPoint;
-                fullInfoCloud->points[index].intensity = range; // the corresponding range of a point is saved as "intensity"
-
-                rangeMat.at<float>(rowIdn, columnIdn) = range;
-
-                // pt_num_by_row++;
-            }
-            // row_num++;
-            // mean_num_by_row += pt_num_by_row;
-            // cout<<rowIdn<<":"<<pt_num_by_row<<", ";
+            rangeMat.at<float>(point_row[i], point_col[i]) = range;
         }
-        // cout<<round(mean_num_by_row/row_num)<<endl;
-        // cout<<"-----------------------------------"<<endl;
     }
 
     // filter laserCloudIn, then save in fullCloud.
@@ -471,56 +475,77 @@ public:
     // azimuth: [-60.0, 60.0]
     void FilterPointCloud()
     {
-        int num_point = laserCloudIn->points.size();
-        DAE_Cloud->points.resize(num_point);
-        std::fill(DAE_Cloud->points.begin(), DAE_Cloud->points.end(), nanPoint);
-
-        if (num_point > 0)
+        if (point_filtered == false)
         {
-            segMsg.startOrientation = laserCloudIn->points[0].timestamp;
-            segMsg.endOrientation = laserCloudIn->points[0].timestamp;
+            int num_point = laserCloudIn->points.size();
+            DAE_Cloud->points.resize(num_point);
+            std::fill(DAE_Cloud->points.begin(), DAE_Cloud->points.end(), nanPoint);
+
+            if (num_point > 0)
+            {
+                segMsg.startOrientation = laserCloudIn->points[0].timestamp;
+                segMsg.endOrientation = laserCloudIn->points[0].timestamp;
+            }
+
+            // float max_ele=0.0, min_ele=0.0;
+            // float max_azi=0.0, min_azi=0.0;
+            float depth=0.0, azimuth=0.0, elevation=0.0;
+            std::map<float, std::map<float, int> > map_ele_azi_idx;
+            for (int i=0; i<num_point;i++)
+            {
+                RsPointXYZIRT curr_point = laserCloudIn->points[i];
+                float range = sqrt(pow(curr_point.x,2) +pow(curr_point.y,2) +pow(curr_point.z,2) );
+                elevation = asin(curr_point.z/range) * 180 /M_PI; //[-90, 90]
+                azimuth = atan2(curr_point.y, curr_point.x) * 180 /M_PI; //[-90, 90]
+                depth = curr_point.x;
+                if (is_point_valid(elevation, azimuth) == false)
+                    continue;
+
+                DAE_Cloud->points[i].x = 10;
+                DAE_Cloud->points[i].y = azimuth;
+                DAE_Cloud->points[i].z = elevation;
+                DAE_Cloud->points[i].intensity = curr_point.intensity;
+                DAE_Cloud->points[i].ring      = curr_point.ring;
+                DAE_Cloud->points[i].timestamp = curr_point.timestamp;
+
+                construct_point_mat(elevation, azimuth, i, map_ele_azi_idx);
+
+                if (curr_point.timestamp < segMsg.startOrientation)
+                    segMsg.startOrientation = curr_point.timestamp;
+                if (curr_point.timestamp > segMsg.endOrientation)
+                    segMsg.endOrientation = curr_point.timestamp;
+            }
+            segMsg.orientationDiff = segMsg.endOrientation - segMsg.startOrientation;
+
+            // for debug
+            // fill_downsampled_DAE_Cloud(map_ele_azi_idx);
+            uint rowIdn, columnIdn;
+            for (const auto& ele_azi_idx : map_ele_azi_idx)
+            {
+                for (const auto& azi_idx : ele_azi_idx.second)
+                {
+                    rowIdn = ele_azi_idx.first + round(elevation_thres/ang_res_y); // e.g. [-6, 6] --> [0, 12]
+                    if ((rowIdn<2)||(rowIdn>21))
+                        continue;
+
+                    columnIdn = azi_idx.first + round(azimuth_thres/ang_res_x); // e.g. [-300, 300] --> [0, 600]
+                    if ((columnIdn<150)|| (columnIdn>550))
+                        continue;
+
+                    point_idx.push_back(azi_idx.second);
+                    point_row.push_back(rowIdn);
+                    point_col.push_back(columnIdn);
+                }
+            }
+
+            point_filtered = true;            
         }
 
-        // float max_ele=0.0, min_ele=0.0;
-        // float max_azi=0.0, min_azi=0.0;
-        float depth=0.0, azimuth=0.0, elevation=0.0;
-        std::map<float, std::map<float, int> > map_ele_azi_idx;
-        int num_failed = 0;
-        for (int i=0; i<num_point;i++)
-        {
-            RsPointXYZIRT curr_point = laserCloudIn->points[i];
-            // if (curr_point.ring != 4)
-            //     continue;
-            float range = sqrt(pow(curr_point.x,2) +pow(curr_point.y,2) +pow(curr_point.z,2));
-            float xy_range = sqrt(pow(curr_point.x,2) +pow(curr_point.y,2));
-            elevation = atan2(curr_point.z, xy_range) * 180 /M_PI; //[-90, 90]
-            azimuth = atan2(curr_point.y, curr_point.x) * 180 /M_PI; //[-90, 90]
-            depth = curr_point.x;
-            if (is_point_valid(elevation, azimuth) == false)
-                continue;
+        cout<< "point_idx length: "<< point_idx.size()<< endl;
 
-            DAE_Cloud->points[i].x = 10;
-            DAE_Cloud->points[i].y = azimuth;
-            DAE_Cloud->points[i].z = elevation;
-            DAE_Cloud->points[i].intensity = curr_point.intensity;
-            DAE_Cloud->points[i].ring      = curr_point.ring;
-            DAE_Cloud->points[i].timestamp = curr_point.timestamp;
+        // get_filteredCloud();
 
-            bool succ = construct_point_mat(elevation, azimuth, i, map_ele_azi_idx);
-            if (!succ)
-                num_failed++;
-
-            if (curr_point.timestamp < segMsg.startOrientation)
-                segMsg.startOrientation = curr_point.timestamp;
-            if (curr_point.timestamp > segMsg.endOrientation)
-                segMsg.endOrientation = curr_point.timestamp;            
-        }
-        segMsg.orientationDiff = segMsg.endOrientation - segMsg.startOrientation;
-
-        // for debug
-        // fill_downsampled_DAE_Cloud(map_ele_azi_idx);
-        projectPointCloud(map_ele_azi_idx);
-       
+        projectPointCloud();
     }
 
     void groundRemoval(){
@@ -587,7 +612,7 @@ public:
         for (size_t i = 0; i < N_SCAN; ++i) {
 
             // drop 4 points at begining of every row(scan)
-            segMsg.startRingIndex[i] = sizeOfSegCloud + 5;
+            segMsg.startRingIndex[i] = sizeOfSegCloud-1 + 5;
 
             for (size_t j = 0; j < Horizon_SCAN; ++j) {
                 if (labelMat.at<int>(i,j) > 0 || groundMat.at<int8_t>(i,j) == 1){
@@ -766,6 +791,7 @@ public:
         // original dense ground cloud
         if (pubGroundCloud.getNumSubscribers() != 0){
             pcl::toROSMsg(*groundCloud, laserCloudTemp);
+            // pcl::toROSMsg(*filteredCloud, laserCloudTemp);
             // pcl::toROSMsg(*downsampled_DAE_Cloud2, laserCloudTemp);
             laserCloudTemp.header.stamp = cloudHeader.stamp;
             laserCloudTemp.header.frame_id = "base_link";
@@ -796,10 +822,6 @@ int main(int argc, char** argv){
 
     ros::init(argc, argv, "lego_loam");
     
-
-    printf("N_SCAN = %d \n", N_SCAN);
-    printf("Horizon_SCAN = %d \n", Horizon_SCAN);
-
     ImageProjection IP;
 
     ROS_INFO("\033[1;32m---->\033[0m Image Projection Started.");

@@ -50,6 +50,9 @@ private:
     ros::Publisher pubSurfPointsFlat;
     ros::Publisher pubSurfPointsLessFlat;
 
+    pcl::PointCloud<RsPointXYZIRT>::Ptr rs_segmentedCloud;
+    pcl::PointCloud<RsPointXYZIRT>::Ptr rs_outlierCloud;
+
     pcl::PointCloud<PointType>::Ptr segmentedCloud;
     pcl::PointCloud<PointType>::Ptr outlierCloud;
 
@@ -181,12 +184,19 @@ private:
 
     int frameCount;
 
+    double t_SweepBegin;
+    double t_SweepEnd;
+    double t_SweepTime;
+    double t_cycle = scanPeriod; // 0.1 second
+    // double t_SweepTime_Last;
+
+    int aaa=0;
 public:
 
     FeatureAssociation():
         nh("~")
         {
-
+    
         subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>("/segmented_cloud", 1, &FeatureAssociation::laserCloudHandler, this);
         subLaserCloudInfo = nh.subscribe<cloud_msgs::cloud_info>("/segmented_cloud_info", 1, &FeatureAssociation::laserCloudInfoHandler, this);
         subOutlierCloud = nh.subscribe<sensor_msgs::PointCloud2>("/outlier_cloud", 1, &FeatureAssociation::outlierCloudHandler, this);
@@ -223,6 +233,9 @@ public:
         cloudSmoothness.resize(N_SCAN*Horizon_SCAN);
 
         downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
+
+        rs_segmentedCloud.reset(new pcl::PointCloud<RsPointXYZIRT>());
+        rs_outlierCloud.reset(new pcl::PointCloud<RsPointXYZIRT>());
 
         segmentedCloud.reset(new pcl::PointCloud<PointType>());
         outlierCloud.reset(new pcl::PointCloud<PointType>());
@@ -345,10 +358,14 @@ public:
 
     void VeloToStartIMU()
     {
+        // in world coordinate
+
+        // get relative velocity to imu(i=0)
         imuVeloFromStartXCur = imuVeloXCur - imuVeloXStart;
         imuVeloFromStartYCur = imuVeloYCur - imuVeloYStart;
         imuVeloFromStartZCur = imuVeloZCur - imuVeloZStart;
 
+        // transform to coordinate imu(i=0)
         float x1 = cosImuYawStart * imuVeloFromStartXCur - sinImuYawStart * imuVeloFromStartZCur;
         float y1 = imuVeloFromStartYCur;
         float z1 = sinImuYawStart * imuVeloFromStartXCur + cosImuYawStart * imuVeloFromStartZCur;
@@ -364,6 +381,7 @@ public:
 
     void TransformToStartIMU(PointType *p)
     {
+        // at first, transform to imu_orientation
         float x1 = cos(imuRollCur) * p->x - sin(imuRollCur) * p->y;
         float y1 = sin(imuRollCur) * p->x + cos(imuRollCur) * p->y;
         float z1 = p->z;
@@ -376,6 +394,7 @@ public:
         float y3 = y2;
         float z3 = -sin(imuYawCur) * x2 + cos(imuYawCur) * z2;
 
+        // then, transform from imu_orientation to imu(i=0)
         float x4 = cosImuYawStart * x3 - sinImuYawStart * z3;
         float y4 = y3;
         float z4 = sinImuYawStart * x3 + cosImuYawStart * z3;
@@ -398,6 +417,15 @@ public:
         float accY = imuAccY[imuPointerLast];
         float accZ = imuAccZ[imuPointerLast];
 
+        // transform to world corrdiate of IMU
+        //  z
+        //  ^     y
+        //  |    ^ 
+        //  |   /
+        //  |  /
+        //  | /
+        //  -----> x
+
         float x1 = cos(roll) * accX - sin(roll) * accY;
         float y1 = sin(roll) * accX + cos(roll) * accY;
         float z1 = accZ;
@@ -410,6 +438,7 @@ public:
         accY = y2;
         accZ = -sin(yaw) * x2 + cos(yaw) * z2;
 
+        // compute shift(T), velocity(V), rotation(R)
         int imuPointerBack = (imuPointerLast + imuQueLength - 1) % imuQueLength;
         double timeDiff = imuTime[imuPointerLast] - imuTime[imuPointerBack];
         if (timeDiff < scanPeriod) {
@@ -435,6 +464,19 @@ public:
         tf::quaternionMsgToTF(imuIn->orientation, orientation);
         tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
 
+        printf("LA: x:%f, y:%f, z:%f\n", imuIn->linear_acceleration.x, imuIn->linear_acceleration.y, imuIn->linear_acceleration.z);
+        printf("AV: x:%f, y:%f, z:%f\n", imuIn->angular_velocity.x, imuIn->angular_velocity.y, imuIn->angular_velocity.z);
+
+        // transform linear_acceleration to LOCAL coordinate
+            //  z->Y
+        //  ^  
+        //  |    ^ y->X
+        //  |   /
+        //  |  /
+        //  | /
+        //  -----> x->Z
+
+        
         float accX = imuIn->linear_acceleration.y - sin(roll) * cos(pitch) * 9.81;
         float accY = imuIn->linear_acceleration.z - cos(roll) * cos(pitch) * 9.81;
         float accZ = imuIn->linear_acceleration.x + sin(pitch) * 9.81;
@@ -451,6 +493,7 @@ public:
         imuAccY[imuPointerLast] = accY;
         imuAccZ[imuPointerLast] = accZ;
 
+        // but do NOT transform angular_velocity
         imuAngularVeloX[imuPointerLast] = imuIn->angular_velocity.x;
         imuAngularVeloY[imuPointerLast] = imuIn->angular_velocity.y;
         imuAngularVeloZ[imuPointerLast] = imuIn->angular_velocity.z;
@@ -466,7 +509,32 @@ public:
         timeNewSegmentedCloud = timeScanCur;
 
         segmentedCloud->clear();
-        pcl::fromROSMsg(*laserCloudMsg, *segmentedCloud);
+        rs_segmentedCloud->clear();
+        pcl::fromROSMsg(*laserCloudMsg, *rs_segmentedCloud);
+
+        // // find the first point's timestamp
+        // if (rs_segmentedCloud->points.size()>0)
+        //     t_SweepBegin = rs_segmentedCloud->points[0].timestamp;
+        // for (int i=0;i<rs_segmentedCloud->points.size(); i++)
+        //     if (rs_segmentedCloud->points[i].timestamp < t_SweepBegin)
+        //         t_SweepBegin = rs_segmentedCloud->points[i].timestamp;
+        
+        // PointType p;    
+        // for (int i=0;i<rs_segmentedCloud->points.size(); i++)
+        // {
+        //     p.x = rs_segmentedCloud->points[i].x;
+        //     p.y = rs_segmentedCloud->points[i].y;
+        //     p.z = rs_segmentedCloud->points[i].z;
+        //     /*
+        //         p.intensity includes 2 parts:
+        //             part1: row number;
+        //             part2: duration value, save the duration time from the first laser point.
+                
+        //         NOTE: "intensity" field is float. So it can not contain the double value of timestamp in rs_segmentedCloud points.
+        //     */
+        //     p.intensity = int(rs_segmentedCloud->points[i].intensity) + rs_segmentedCloud->points[i].timestamp - t_SweepBegin;
+        //     segmentedCloud->push_back(p);
+        // }
 
         newSegmentedCloud = true;
     }
@@ -476,8 +544,18 @@ public:
         timeNewOutlierCloud = msgIn->header.stamp.toSec();
 
         outlierCloud->clear();
-        pcl::fromROSMsg(*msgIn, *outlierCloud);
 
+        rs_outlierCloud->clear();
+        pcl::fromROSMsg(*msgIn, *rs_outlierCloud);
+        PointType p;
+        for (int i=0;i<rs_outlierCloud->points.size(); i++)
+        {
+            p.x = rs_outlierCloud->points[i].x;
+            p.y = rs_outlierCloud->points[i].y;
+            p.z = rs_outlierCloud->points[i].z;
+            p.intensity = rs_outlierCloud->points[i].intensity;
+            outlierCloud->push_back(p);
+        }
         newOutlierCloud = true;
     }
 
@@ -485,144 +563,221 @@ public:
     {
         timeNewSegmentedCloudInfo = msgIn->header.stamp.toSec();
         segInfo = *msgIn;
+
+        t_SweepBegin = segInfo.startOrientation;
+        t_SweepEnd = segInfo.endOrientation;
+        t_SweepTime = segInfo.orientationDiff;
+        // printf("%lf, %lf, %lf\n", t_SweepBegin, t_SweepEnd, t_SweepTime);
+
         newSegmentedCloudInfo = true;
+    }
+
+    void GetIMUValue(float pointTime)
+    {
+        imuPointerFront = imuPointerLastIteration; // find from the found index in last iteration. avoiding find from beginning of imu record.
+        while (imuPointerFront != imuPointerLast) { // if not ending...
+            if (t_SweepBegin + pointTime < imuTime[imuPointerFront]) {
+                break;
+            }
+            imuPointerFront = (imuPointerFront + 1) % imuQueLength;
+        }
+
+        // get right imuRPYCur/ imuVeloCur/ imuShiftCur
+        if (t_SweepBegin + pointTime > imuTime[imuPointerFront]) 
+        { // if do not find the later imu info, then use the ealier imu info.
+            imuRollCur = imuRoll[imuPointerFront];
+            imuPitchCur = imuPitch[imuPointerFront];
+            imuYawCur = imuYaw[imuPointerFront];
+
+            imuVeloXCur = imuVeloX[imuPointerFront];
+            imuVeloYCur = imuVeloY[imuPointerFront];
+            imuVeloZCur = imuVeloZ[imuPointerFront];
+
+            imuShiftXCur = imuShiftX[imuPointerFront];
+            imuShiftYCur = imuShiftY[imuPointerFront];
+            imuShiftZCur = imuShiftZ[imuPointerFront];   
+        }
+        else 
+        { // if found, then estimate imu value using two neighbore imu value. it maybe more accurate.
+            int imuPointerBack = (imuPointerFront + imuQueLength - 1) % imuQueLength;
+            float ratioFront = (t_SweepBegin + pointTime - imuTime[imuPointerBack]) 
+                                                / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
+            float ratioBack = (imuTime[imuPointerFront] - t_SweepBegin - pointTime) 
+                                            / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
+
+            imuRollCur = imuRoll[imuPointerFront] * ratioFront + imuRoll[imuPointerBack] * ratioBack;
+            imuPitchCur = imuPitch[imuPointerFront] * ratioFront + imuPitch[imuPointerBack] * ratioBack;
+            if (imuYaw[imuPointerFront] - imuYaw[imuPointerBack] > M_PI) {
+                imuYawCur = imuYaw[imuPointerFront] * ratioFront + (imuYaw[imuPointerBack] + 2 * M_PI) * ratioBack;
+            } else if (imuYaw[imuPointerFront] - imuYaw[imuPointerBack] < -M_PI) {
+                imuYawCur = imuYaw[imuPointerFront] * ratioFront + (imuYaw[imuPointerBack] - 2 * M_PI) * ratioBack;
+            } else {
+                imuYawCur = imuYaw[imuPointerFront] * ratioFront + imuYaw[imuPointerBack] * ratioBack;
+            }
+
+            imuVeloXCur = imuVeloX[imuPointerFront] * ratioFront + imuVeloX[imuPointerBack] * ratioBack;
+            imuVeloYCur = imuVeloY[imuPointerFront] * ratioFront + imuVeloY[imuPointerBack] * ratioBack;
+            imuVeloZCur = imuVeloZ[imuPointerFront] * ratioFront + imuVeloZ[imuPointerBack] * ratioBack;
+
+            imuShiftXCur = imuShiftX[imuPointerFront] * ratioFront + imuShiftX[imuPointerBack] * ratioBack;
+            imuShiftYCur = imuShiftY[imuPointerFront] * ratioFront + imuShiftY[imuPointerBack] * ratioBack;
+            imuShiftZCur = imuShiftZ[imuPointerFront] * ratioFront + imuShiftZ[imuPointerBack] * ratioBack;
+        }
     }
 
     void adjustDistortion()
     {
-        bool halfPassed = false;
-        int cloudSize = segmentedCloud->points.size();
+        // printf("sec.nsec: %lf\n", segInfo.header.stamp.sec+segInfo.header.stamp.nsec/1e9);
+        // same to 
+        // printf("toSec():  %lf\n", segInfo.header.stamp.toSec());
+        /*  
+            here, observed in the print results, 
+            this timestamp is always le to the "maxt" (declared below)
+            so we will find the "mint" as the beginning time of scan.
+            e.g.,
+                cloudSize: 7408
+                sec.nsec: 1657258827.463385
+                toSec():  1657258827.463385
 
+                min: 1657258827.374602
+                max: 1657258827.463426
+                duration: 0.088824
+                -------------
+                cloudSize: 7434
+                sec.nsec: 1657258827.563276
+                toSec():  1657258827.563276
+
+                min: 1657258827.474527
+                max: 1657258827.563323
+                duration: 0.088796
+                -------------
+                cloudSize: 7427
+                sec.nsec: 1657258827.663161
+                toSec():  1657258827.663161
+
+                min: 1657258827.574401
+                max: 1657258827.663207
+                duration: 0.088806
+                -------------
+                cloudSize: 7435
+                sec.nsec: 1657258827.763013
+                toSec():  1657258827.763013
+
+                min: 1657258827.674263
+                max: 1657258827.763044
+                duration: 0.088781
+
+        */
+
+        int cloudSize = rs_segmentedCloud->points.size();
+        // cout<<"cloudSize: "<<cloudSize<<endl;
+        double maxt = rs_segmentedCloud->points[0].timestamp;
+        double mint = rs_segmentedCloud->points[0].timestamp;
         PointType point;
-
-        for (int i = 0; i < cloudSize; i++) {
-
+        int earliest_point_idx = -1;
+        int latest_point_idx = -1;
+        for (int i = 0; i < cloudSize; i++) 
+        {
             point.x = segmentedCloud->points[i].y;
             point.y = segmentedCloud->points[i].z;
             point.z = segmentedCloud->points[i].x;
-
-            float ori = -atan2(point.x, point.z);
-            if (!halfPassed) {
-                if (ori < segInfo.startOrientation - M_PI / 2)
-                    ori += 2 * M_PI;
-                else if (ori > segInfo.startOrientation + M_PI * 3 / 2)
-                    ori -= 2 * M_PI;
-
-                if (ori - segInfo.startOrientation > M_PI)
-                    halfPassed = true;
-            } else {
-                ori += 2 * M_PI;
-
-                if (ori < segInfo.endOrientation - M_PI * 3 / 2)
-                    ori += 2 * M_PI;
-                else if (ori > segInfo.endOrientation + M_PI / 2)
-                    ori -= 2 * M_PI;
-            }
-
-            float relTime = (ori - segInfo.startOrientation) / segInfo.orientationDiff;
-            point.intensity = int(segmentedCloud->points[i].intensity) + scanPeriod * relTime;
-
-            if (imuPointerLast >= 0) {
-                float pointTime = relTime * scanPeriod;
-                imuPointerFront = imuPointerLastIteration;
-                while (imuPointerFront != imuPointerLast) {
-                    if (timeScanCur + pointTime < imuTime[imuPointerFront]) {
-                        break;
-                    }
-                    imuPointerFront = (imuPointerFront + 1) % imuQueLength;
-                }
-
-                if (timeScanCur + pointTime > imuTime[imuPointerFront]) {
-                    imuRollCur = imuRoll[imuPointerFront];
-                    imuPitchCur = imuPitch[imuPointerFront];
-                    imuYawCur = imuYaw[imuPointerFront];
-
-                    imuVeloXCur = imuVeloX[imuPointerFront];
-                    imuVeloYCur = imuVeloY[imuPointerFront];
-                    imuVeloZCur = imuVeloZ[imuPointerFront];
-
-                    imuShiftXCur = imuShiftX[imuPointerFront];
-                    imuShiftYCur = imuShiftY[imuPointerFront];
-                    imuShiftZCur = imuShiftZ[imuPointerFront];   
-                } else {
-                    int imuPointerBack = (imuPointerFront + imuQueLength - 1) % imuQueLength;
-                    float ratioFront = (timeScanCur + pointTime - imuTime[imuPointerBack]) 
-                                                     / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
-                    float ratioBack = (imuTime[imuPointerFront] - timeScanCur - pointTime) 
-                                                    / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
-
-                    imuRollCur = imuRoll[imuPointerFront] * ratioFront + imuRoll[imuPointerBack] * ratioBack;
-                    imuPitchCur = imuPitch[imuPointerFront] * ratioFront + imuPitch[imuPointerBack] * ratioBack;
-                    if (imuYaw[imuPointerFront] - imuYaw[imuPointerBack] > M_PI) {
-                        imuYawCur = imuYaw[imuPointerFront] * ratioFront + (imuYaw[imuPointerBack] + 2 * M_PI) * ratioBack;
-                    } else if (imuYaw[imuPointerFront] - imuYaw[imuPointerBack] < -M_PI) {
-                        imuYawCur = imuYaw[imuPointerFront] * ratioFront + (imuYaw[imuPointerBack] - 2 * M_PI) * ratioBack;
-                    } else {
-                        imuYawCur = imuYaw[imuPointerFront] * ratioFront + imuYaw[imuPointerBack] * ratioBack;
-                    }
-
-                    imuVeloXCur = imuVeloX[imuPointerFront] * ratioFront + imuVeloX[imuPointerBack] * ratioBack;
-                    imuVeloYCur = imuVeloY[imuPointerFront] * ratioFront + imuVeloY[imuPointerBack] * ratioBack;
-                    imuVeloZCur = imuVeloZ[imuPointerFront] * ratioFront + imuVeloZ[imuPointerBack] * ratioBack;
-
-                    imuShiftXCur = imuShiftX[imuPointerFront] * ratioFront + imuShiftX[imuPointerBack] * ratioBack;
-                    imuShiftYCur = imuShiftY[imuPointerFront] * ratioFront + imuShiftY[imuPointerBack] * ratioBack;
-                    imuShiftZCur = imuShiftZ[imuPointerFront] * ratioFront + imuShiftZ[imuPointerBack] * ratioBack;
-                }
-
-                if (i == 0) {
-                    imuRollStart = imuRollCur;
-                    imuPitchStart = imuPitchCur;
-                    imuYawStart = imuYawCur;
-
-                    imuVeloXStart = imuVeloXCur;
-                    imuVeloYStart = imuVeloYCur;
-                    imuVeloZStart = imuVeloZCur;
-
-                    imuShiftXStart = imuShiftXCur;
-                    imuShiftYStart = imuShiftYCur;
-                    imuShiftZStart = imuShiftZCur;
-
-                    if (timeScanCur + pointTime > imuTime[imuPointerFront]) {
-                        imuAngularRotationXCur = imuAngularRotationX[imuPointerFront];
-                        imuAngularRotationYCur = imuAngularRotationY[imuPointerFront];
-                        imuAngularRotationZCur = imuAngularRotationZ[imuPointerFront];
-                    }else{
-                        int imuPointerBack = (imuPointerFront + imuQueLength - 1) % imuQueLength;
-                        float ratioFront = (timeScanCur + pointTime - imuTime[imuPointerBack]) 
-                                                         / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
-                        float ratioBack = (imuTime[imuPointerFront] - timeScanCur - pointTime) 
-                                                        / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
-                        imuAngularRotationXCur = imuAngularRotationX[imuPointerFront] * ratioFront + imuAngularRotationX[imuPointerBack] * ratioBack;
-                        imuAngularRotationYCur = imuAngularRotationY[imuPointerFront] * ratioFront + imuAngularRotationY[imuPointerBack] * ratioBack;
-                        imuAngularRotationZCur = imuAngularRotationZ[imuPointerFront] * ratioFront + imuAngularRotationZ[imuPointerBack] * ratioBack;
-                    }
-
-                    imuAngularFromStartX = imuAngularRotationXCur - imuAngularRotationXLast;
-                    imuAngularFromStartY = imuAngularRotationYCur - imuAngularRotationYLast;
-                    imuAngularFromStartZ = imuAngularRotationZCur - imuAngularRotationZLast;
-
-                    imuAngularRotationXLast = imuAngularRotationXCur;
-                    imuAngularRotationYLast = imuAngularRotationYCur;
-                    imuAngularRotationZLast = imuAngularRotationZCur;
-
-                    updateImuRollPitchYawStartSinCos();
-                } else {
-                    VeloToStartIMU();
-                    TransformToStartIMU(&point);
-                }
-            }
+            point.intensity =  segmentedCloud->points[i].intensity; // rownum + (time after the 1st point's timestamp in a sweep)
+            // printf("%lf, ", point.intensity);
+            // printf("%lf, ", point.intensity - int(point.intensity));
+         
             segmentedCloud->points[i] = point;
+
+            // get index of the first point and the last point
+            if (rs_segmentedCloud->points[i].timestamp > maxt)
+            {
+                latest_point_idx = i;
+                maxt = rs_segmentedCloud->points[i].timestamp;
+            }
+            if (rs_segmentedCloud->points[i].timestamp < mint)
+            {
+                earliest_point_idx = i;
+                mint = rs_segmentedCloud->points[i].timestamp;
+            }
+        }
+
+        // if imu given,
+        if (imuPointerLast >= 0) {
+            // the first point in this sweep
+            point = segmentedCloud->points[earliest_point_idx];
+            float pointTime = point.intensity - int(point.intensity);
+            GetIMUValue(pointTime);
+
+            // init imuXXXXStart values. the first point's rpy (i=0) relative to the imu orientation
+            imuRollStart = imuRollCur;
+            imuPitchStart = imuPitchCur;
+            imuYawStart = imuYawCur;
+
+            imuVeloXStart = imuVeloXCur;
+            imuVeloYStart = imuVeloYCur;
+            imuVeloZStart = imuVeloZCur;
+
+            imuShiftXStart = imuShiftXCur;
+            imuShiftYStart = imuShiftYCur;
+            imuShiftZStart = imuShiftZCur;
+
+            // get right imuAngularRotationXCur
+            if (t_SweepBegin + pointTime > imuTime[imuPointerFront]) 
+            {
+                imuAngularRotationXCur = imuAngularRotationX[imuPointerFront];
+                imuAngularRotationYCur = imuAngularRotationY[imuPointerFront];
+                imuAngularRotationZCur = imuAngularRotationZ[imuPointerFront];
+            }
+            else{
+                int imuPointerBack = (imuPointerFront + imuQueLength - 1) % imuQueLength;
+                float ratioFront = (t_SweepBegin + pointTime - imuTime[imuPointerBack]) 
+                                                    / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
+                float ratioBack = (imuTime[imuPointerFront] - t_SweepBegin - pointTime) 
+                                                / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
+                imuAngularRotationXCur = imuAngularRotationX[imuPointerFront] * ratioFront + imuAngularRotationX[imuPointerBack] * ratioBack;
+                imuAngularRotationYCur = imuAngularRotationY[imuPointerFront] * ratioFront + imuAngularRotationY[imuPointerBack] * ratioBack;
+                imuAngularRotationZCur = imuAngularRotationZ[imuPointerFront] * ratioFront + imuAngularRotationZ[imuPointerBack] * ratioBack;
+            }
+
+            imuAngularFromStartX = imuAngularRotationXCur - imuAngularRotationXLast;
+            imuAngularFromStartY = imuAngularRotationYCur - imuAngularRotationYLast;
+            imuAngularFromStartZ = imuAngularRotationZCur - imuAngularRotationZLast;
+            // save them for next frame
+            imuAngularRotationXLast = imuAngularRotationXCur;
+            imuAngularRotationYLast = imuAngularRotationYCur;
+            imuAngularRotationZLast = imuAngularRotationZCur;
+
+            updateImuRollPitchYawStartSinCos();
+
+
+            for (int i = 0; i < cloudSize; i++) 
+            {
+                if (i == earliest_point_idx)
+                    continue;
+
+                
+                point = segmentedCloud->points[latest_point_idx];
+                pointTime = point.intensity - int(point.intensity);
+                GetIMUValue(pointTime);
+                VeloToStartIMU(); // in fact, the values of the last point in this sweep
+                // transform xyz value to Start coordinate, all points in segmentedCloud.
+                // so Note: later, Surf-points and Corner-points all come from this cloud
+                TransformToStartIMU( &segmentedCloud->points[i] );
+            }            
         }
 
         imuPointerLastIteration = imuPointerLast;
+
+        // cout<<endl;
+        // printf("min: %lf\n", mint);
+        // printf("max: %lf\n", maxt);
+        // printf("duration: %lf\n-------------\n", maxt-mint);        
     }
 
     void calculateSmoothness()
     {
         int cloudSize = segmentedCloud->points.size();
+        // printf("cloud-size: %d\n", cloudSize);
         for (int i = 5; i < cloudSize - 5; i++) {
-
             float diffRange = segInfo.segmentedCloudRange[i-5] + segInfo.segmentedCloudRange[i-4]
                             + segInfo.segmentedCloudRange[i-3] + segInfo.segmentedCloudRange[i-2]
                             + segInfo.segmentedCloudRange[i-1] - segInfo.segmentedCloudRange[i] * 10
@@ -630,7 +785,9 @@ public:
                             + segInfo.segmentedCloudRange[i+3] + segInfo.segmentedCloudRange[i+4]
                             + segInfo.segmentedCloudRange[i+5];            
 
-            cloudCurvature[i] = diffRange*diffRange;
+            cloudCurvature[i] = abs(diffRange);
+            // cloudCurvature[i] = diffRange/10/segInfo.segmentedCloudRange[i];
+
 
             cloudNeighborPicked[i] = 0;
             cloudLabel[i] = 0;
@@ -679,6 +836,13 @@ public:
 
     void extractFeatures()
     {
+/* 
+        In segmented points, checkout 4 catogaries and save in cloudLabel(init value=0)
+           -1:  surfPointsFlat
+          <=0:  surfPointsLessFlatScan, too much, so got by downsample "surfPointsLessFlatScan" in all row
+            1:  cornerPointsLessSharp
+            2:  cornerPointsSharp
+*/
         cornerPointsSharp->clear();
         cornerPointsLessSharp->clear();
         surfPointsFlat->clear();
@@ -687,20 +851,29 @@ public:
         for (int i = 0; i < N_SCAN; i++) {
 
             surfPointsLessFlatScan->clear();
+            
+            // 2 for robo lidar,  6 for veloden lidar
+            // int num_divided = 1;
 
-            for (int j = 0; j < 6; j++) {
+            // for (int j = 0; j < num_divided; j++) {
 
-                int sp = (segInfo.startRingIndex[i] * (6 - j)    + segInfo.endRingIndex[i] * j) / 6;
-                int ep = (segInfo.startRingIndex[i] * (5 - j)    + segInfo.endRingIndex[i] * (j + 1)) / 6 - 1;
+                // int sp = (segInfo.startRingIndex[i] * (num_divided - j)    + segInfo.endRingIndex[i] * j) / num_divided;
+                // int ep = (segInfo.startRingIndex[i] * (num_divided-1 - j)    + segInfo.endRingIndex[i] * (j + 1)) / num_divided - 1;
+
+                int sp = segInfo.startRingIndex[i];
+                int ep = segInfo.endRingIndex[i] - 1;
 
                 if (sp >= ep)
                     continue;
 
+                // sort by curature value
                 std::sort(cloudSmoothness.begin()+sp, cloudSmoothness.begin()+ep, by_value());
 
                 int largestPickedNum = 0;
                 for (int k = ep; k >= sp; k--) {
+                    // start from the point with the biggest curature-value
                     int ind = cloudSmoothness[k].ind;
+                    // not occluded, curature-value is larger than thres, not ground
                     if (cloudNeighborPicked[ind] == 0 &&
                         cloudCurvature[ind] > edgeThreshold &&
                         segInfo.segmentedCloudGroundFlag[ind] == false) {
@@ -717,6 +890,7 @@ public:
                             break;
                         }
 
+                        // pick neighboring points of cornerPoints 
                         cloudNeighborPicked[ind] = 1;
                         for (int l = 1; l <= 5; l++) {
                             int columnDiff = std::abs(int(segInfo.segmentedCloudColInd[ind + l] - segInfo.segmentedCloudColInd[ind + l - 1]));
@@ -748,6 +922,7 @@ public:
                             break;
                         }
 
+                        // pick neighboring points of surfPoints 
                         cloudNeighborPicked[ind] = 1;
                         for (int l = 1; l <= 5; l++) {
 
@@ -773,7 +948,7 @@ public:
                         surfPointsLessFlatScan->push_back(segmentedCloud->points[k]);
                     }
                 }
-            }
+            // }
 
             surfPointsLessFlatScanDS->clear();
             downSizeFilter.setInputCloud(surfPointsLessFlatScan);
@@ -781,6 +956,12 @@ public:
 
             *surfPointsLessFlat += *surfPointsLessFlatScanDS;
         }
+        // cout<<cornerPointsSharp->points.size()<<" cornerPointsSharp"<<endl;
+        // cout<<cornerPointsLessSharp->points.size()<<" cornerPointsLessSharp"<<endl;
+        // cout<<surfPointsFlat->points.size()<<" surfPointsFlat"<<endl;
+        // cout<<surfPointsLessFlat->points.size()<<" surfPointsLessFlat"<<endl;
+        // cout<<segmentedCloud->points.size()<<" segmentedCloud"<<endl;
+        // cout<<"-------------------------------"<<endl;
     }
 
     void publishCloud()
@@ -859,7 +1040,8 @@ public:
 
     void TransformToStart(PointType const * const pi, PointType * const po)
     {
-        float s = 10 * (pi->intensity - int(pi->intensity));
+        // float s = 10 * (pi->intensity - int(pi->intensity));
+        float s = (pi->intensity - int(pi->intensity))/t_SweepTime;
 
         float rx = s * transformCur[0];
         float ry = s * transformCur[1];
@@ -884,7 +1066,8 @@ public:
 
     void TransformToEnd(PointType const * const pi, PointType * const po)
     {
-        float s = 10 * (pi->intensity - int(pi->intensity));
+        // float s = 10 * (pi->intensity - int(pi->intensity));
+        float s = (pi->intensity - int(pi->intensity))/t_SweepTime;
 
         float rx = s * transformCur[0];
         float ry = s * transformCur[1];
@@ -905,12 +1088,12 @@ public:
         float y3 = y2;
         float z3 = sin(ry) * x2 + cos(ry) * z2;
 
-        rx = transformCur[0];
-        ry = transformCur[1];
-        rz = transformCur[2];
-        tx = transformCur[3];
-        ty = transformCur[4];
-        tz = transformCur[5];
+        rx = transformCur[0] * t_cycle /t_SweepTime;
+        ry = transformCur[1] * t_cycle /t_SweepTime;
+        rz = transformCur[2] * t_cycle /t_SweepTime;
+        tx = transformCur[3] * t_cycle /t_SweepTime;
+        ty = transformCur[4] * t_cycle /t_SweepTime;
+        tz = transformCur[5] * t_cycle /t_SweepTime;
 
         float x4 = cos(ry) * x3 + sin(ry) * z3;
         float y4 = y3;
@@ -1118,20 +1301,27 @@ public:
                 float y2 = tripod2.y;
                 float z2 = tripod2.z;
 
+                // cross product of Vector_ij and Vector_il
+                // (m33, -m22, m11)
                 float m11 = ((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1));
                 float m22 = ((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1));
                 float m33 = ((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1));
 
+                // mode of Vector (m33, -m22, m11)
                 float a012 = sqrt(m11 * m11  + m22 * m22 + m33 * m33);
 
+                // distance of P_j to P_l
                 float l12 = sqrt((x1 - x2)*(x1 - x2) + (y1 - y2)*(y1 - y2) + (z1 - z2)*(z1 - z2));
 
+                // unit vector of Vector_jl, unit normal vector of Planar_ijl
+                // compute the cross product of them
                 float la =  ((y1 - y2)*m11 + (z1 - z2)*m22) / a012 / l12;
 
                 float lb = -((x1 - x2)*m11 - (z1 - z2)*m33) / a012 / l12;
 
                 float lc = -((x1 - x2)*m22 + (y1 - y2)*m33) / a012 / l12;
 
+                // distance from P_i to Line_jl
                 float ld2 = a012 / l12;
 
                 float s = 1;
@@ -1158,17 +1348,25 @@ public:
 
         for (int i = 0; i < surfPointsFlatNum; i++) {
 
+            // in start coord, to estimate postion(xyz) at start time for a point, assuming uniform motion
+            // for better matching
             TransformToStart(&surfPointsFlat->points[i], &pointSel);
 
             if (iterCount % 5 == 0) {
 
                 kdtreeSurfLast->nearestKSearch(pointSel, 1, pointSearchInd, pointSearchSqDis);
+                /* 
+                    closestPointInd: closest point in last frame. (matched point)
+                    minPointInd2: closest point in same row in last frame.
+                    minPointInd3: closest point in next 2 rows(up or down) in last frame.
+                */    
                 int closestPointInd = -1, minPointInd2 = -1, minPointInd3 = -1;
 
                 if (pointSearchSqDis[0] < nearestFeatureSearchSqDist) {
                     closestPointInd = pointSearchInd[0];
                     int closestPointScan = int(laserCloudSurfLast->points[closestPointInd].intensity);
 
+                    // find closest point in neighbore two rows, point in up 2 rows saved in minPointInd3
                     float pointSqDis, minPointSqDis2 = nearestFeatureSearchSqDist, minPointSqDis3 = nearestFeatureSearchSqDist;
                     for (int j = closestPointInd + 1; j < surfPointsFlatNum; j++) {
                         if (int(laserCloudSurfLast->points[j].intensity) > closestPointScan + 2.5) {
@@ -1247,6 +1445,16 @@ public:
                 pd /= ps;
 
                 float pd2 = pa * pointSel.x + pb * pointSel.y + pc * pointSel.z + pd;
+                /*
+                    in fact, till now,
+                    we project point_j to unit normal vector p:
+                        pd = -(pa * tripod1.x + pb * tripod1.y + pc * tripod1.z);
+                    we project point_i to p:
+                        pa * pointSel.x + pb * pointSel.y + pc * pointSel.z
+                    so, pd2 is to project Vector_ij to p, which is distance from i to planar_jlm
+                        pd2 = (pa, pb, pc) dot_prod (pointSel - tripod1)                
+                
+                */
 
                 float s = 1;
                 if (iterCount >= 5) {
@@ -1354,7 +1562,7 @@ public:
             matX.copyTo(matX2);
             matX = matP * matX2;
         }
-
+        // z, roll, pitch ---> Y, Rz, Rx (transformCur[4/2/0])        
         transformCur[0] += matX.at<float>(0, 0);
         transformCur[2] += matX.at<float>(1, 0);
         transformCur[4] += matX.at<float>(2, 0);
@@ -1456,6 +1664,7 @@ public:
             matX = matP * matX2;
         }
 
+        // yaw, x, y ---> Ry, Z, X (transformCur[1/5/3])
         transformCur[1] += matX.at<float>(0, 0);
         transformCur[3] += matX.at<float>(1, 0);
         transformCur[5] += matX.at<float>(2, 0);
@@ -1650,6 +1859,10 @@ public:
         imuVeloFromStartY = imuVeloFromStartYCur;
         imuVeloFromStartZ = imuVeloFromStartZCur;
 
+        // transformCur: in current coordinate. R and t for transform from curr to start.
+        // P_start = R*P_cur + t
+        // R (yzx~XYZ) ~ (transformCur[0], transformCur[1], transformCur[2])
+        // t ~ (transformCur[3], transformCur[4], transformCur[5])
         if (imuAngularFromStartX != 0 || imuAngularFromStartY != 0 || imuAngularFromStartZ != 0){
             transformCur[0] = - imuAngularFromStartY;
             transformCur[1] = - imuAngularFromStartZ;
@@ -1814,22 +2027,44 @@ public:
         }
     }
 
+    void BuildSegmentedCloud()
+    {
+        PointType p;    
+        for (int i=0;i<rs_segmentedCloud->points.size(); i++)
+        {
+            p.x = rs_segmentedCloud->points[i].x;
+            p.y = rs_segmentedCloud->points[i].y;
+            p.z = rs_segmentedCloud->points[i].z;
+            /*
+                p.intensity includes 2 parts:
+                    part1: row number;
+                    part2: duration value, save the duration time from the first laser point.
+                
+                NOTE: "intensity" field is float. So it can not contain the double value of timestamp in rs_segmentedCloud points.
+            */
+            p.intensity = int(rs_segmentedCloud->points[i].intensity) + rs_segmentedCloud->points[i].timestamp - t_SweepBegin;
+            segmentedCloud->push_back(p);
+        }
+    }
     void runFeatureAssociation()
     {
-
         if (newSegmentedCloud && newSegmentedCloudInfo && newOutlierCloud &&
-            std::abs(timeNewSegmentedCloudInfo - timeNewSegmentedCloud) < 0.05 &&
-            std::abs(timeNewOutlierCloud - timeNewSegmentedCloud) < 0.05){
+            std::abs(timeNewSegmentedCloudInfo - timeNewSegmentedCloud) < 0.05 && // assure these info are from the same frame.
+            std::abs(timeNewOutlierCloud - timeNewSegmentedCloud) < 0.05)
+        {
+            BuildSegmentedCloud();
 
             newSegmentedCloud = false;
             newSegmentedCloudInfo = false;
             newOutlierCloud = false;
-        }else{
-            return;
         }
+        else
+            return;
+
         /**
         	1. Feature Extraction
         */
+    
         adjustDistortion();
 
         calculateSmoothness();
@@ -1838,8 +2073,9 @@ public:
 
         extractFeatures();
 
-        publishCloud(); // cloud for visualization
-	
+        publishCloud(); 
+
+
         /**
 		2. Feature Association
         */
@@ -1850,13 +2086,20 @@ public:
 
         updateInitialGuess();
 
+        // aaa++;
+        // cout<<"----------------------------"<<endl;
+        // printf("%d start : %lf, %lf, %lf, %lf, %lf, %lf\n", aaa, transformCur[0], transformCur[1], transformCur[2], transformCur[3], transformCur[4], transformCur[5]);
+
+
         updateTransformation();
+        
+        // printf("%d ending: %lf, %lf, %lf, %lf, %lf, %lf\n", aaa, transformCur[0], transformCur[1], transformCur[2], transformCur[3], transformCur[4], transformCur[5]);
 
         integrateTransformation();
 
         publishOdometry();
 
-        publishCloudsLast(); // cloud to mapOptimization
+        publishCloudsLast(); 
     }
 };
 

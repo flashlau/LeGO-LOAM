@@ -373,6 +373,123 @@ public:
         latestFrameID = 0;
     }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Eigen::Matrix4f rotx(float angle)
+{
+    Eigen::Matrix4f b1;
+    b1 << 1, 0, 0, 0,
+          0, cos(angle), -sin(angle), 0,
+          0, sin(angle), cos(angle), 0,
+          0, 0, 0, 1;
+    return b1;
+}
+Eigen::Matrix4f roty(float angle)
+{
+    Eigen::Matrix4f b1;
+    b1 << cos(angle), 0, sin(angle), 0,
+          0, 1, 0, 0,
+          -sin(angle), 0, cos(angle), 0,
+          0, 0, 0, 1;
+    return b1;
+}
+Eigen::Matrix4f rotz(float angle)
+{
+    Eigen::Matrix4f b1;
+    b1 << cos(angle), -sin(angle), 0, 0,
+          sin(angle), cos(angle), 0, 0,
+          0, 0, 1, 0,
+          0,0,0,1;
+    return b1;
+}
+void wrap_transformAssociateToMap()
+{
+    std::cout << transformTobeMapped[0] << " , "
+            << transformTobeMapped[1] << " , "
+            << transformTobeMapped[2] << " , "
+            << transformTobeMapped[3] << " , "
+            << transformTobeMapped[4] << " , "
+            << transformTobeMapped[5] << std::endl;
+    // std::cout << "angle : "<< M_PI/2.0 - (M_PI/4 - M_PI/6)<<std::endl;
+
+    Eigen::Matrix4f a = roty(transformTobeMapped[1]) * rotx(transformTobeMapped[0]) * rotz(transformTobeMapped[2]);
+    a(0,3) = transformTobeMapped[3];
+    a(1,3) = transformTobeMapped[4];
+    a(2,3) = transformTobeMapped[5];
+    cout<<"transformTobeMapped:"<<endl;
+    std::cout << a << std::endl;
+    
+
+    Eigen::Matrix4f t1 = roty(transformSum[1]) * rotx(transformSum[0]) * rotz(transformSum[2]);
+    t1(0,3) = transformSum[3];
+    t1(1,3) = transformSum[4];
+    t1(2,3) = transformSum[5];
+
+    Eigen::Matrix4f t2 = roty(transformBefMapped[1]) * rotx(transformBefMapped[0]) * rotz(transformBefMapped[2]);
+    t2(0,3) = transformBefMapped[3];
+    t2(1,3) = transformBefMapped[4];
+    t2(2,3) = transformBefMapped[5];
+
+    Eigen::Matrix4f t3 = roty(transformAftMapped[1]) * rotx(transformAftMapped[0]) * rotz(transformAftMapped[2]);
+    t3(0,3) = transformAftMapped[3];
+    t3(1,3) = transformAftMapped[4];
+    t3(2,3) = transformAftMapped[5];
+
+    Eigen::Matrix4f c = t3 * t2.inverse() * t1;
+
+    cout<<"wrapped_transformTobeMapped:"<<endl;
+    std::cout << c <<std::endl;
+
+    std::cout << "------------------"<<std::endl;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     void transformAssociateToMap()
     {
         float x1 = cos(transformSum[1]) * (transformBefMapped[3] - transformSum[3]) 
@@ -458,6 +575,9 @@ public:
         transformTobeMapped[4] = transformAftMapped[4] - y2;
         transformTobeMapped[5] = transformAftMapped[5] 
                                - (-sin(transformTobeMapped[1]) * x2 + cos(transformTobeMapped[1]) * z2);
+
+        // validation.
+        // wrap_transformAssociateToMap();
     }
 
     void transformUpdate()
@@ -1283,6 +1403,8 @@ public:
             cv::eigen(matAtA, matE, matV);
             matV.copyTo(matV2);
 
+            // cout<<matV<<endl<<endl;
+
             isDegenerate = false;
             float eignThre[6] = {100, 100, 100, 100, 100, 100};
             for (int i = 5; i >= 0; i--) {
@@ -1296,6 +1418,7 @@ public:
                 }
             }
             matP = matV.inv() * matV2;
+            // cout<<matP<<endl<<"-----------------------------------------"<<endl;
         }
 
         if (isDegenerate) {
